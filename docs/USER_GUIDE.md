@@ -1,10 +1,10 @@
 # Speaker Studio: how to use it
 
-For version **0.1.1**. Open **Help** in the app, or press **F1**, for a quick guide. Hover over controls to see tips.
+For version **0.1.2**. Open **Help** in the app, or press **F1**, for a quick guide. Hover over controls to see tips.
 
 ## Start the app
 
-Double-click **Start Speaker Studio.bat** in the main folder. The first setup installs the local speech engine and builds the app; downloads can take a while. Later launches open the executable directly.
+Double-click **Start Speaker Studio.bat** in the main folder. The first setup installs the local speech engine and uses the included executable. If no executable is present, setup builds it from source. Downloads can take a while. Later launches open the executable directly. For the prebuilt ZIP, follow the [Windows download guide](WINDOWS_DOWNLOAD.md).
 
 Wait for the engine indicator to say **Nemotron**. Models and linked media may need an internet connection to download. Speech analysis runs on this computer. This app still uses its `engine` and `.engine` folders, so keep them alongside the executable.
 
@@ -97,13 +97,13 @@ Recordings, transcripts, and portraits live in the `sessions` folder beside the 
 
 **A person's speech is missing from the view or export:** set Show speakers to 8. Also inspect Unassigned and Overlap. Turning Me off does not remove earlier microphone speech.
 
-**The engine will not load:** open Log for the error. Run the following from the app folder to verify/repair dependencies and rebuild:
+**The engine will not load:** open Log for the error. Run the following from the app folder to verify/repair dependencies while keeping the existing executable:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-Setup requires Python 3.11 (the script uses `py -3.11`), Rust/Cargo, the Windows C++ build tools and SDK, Git for the Transformers installation, and FFmpeg for media conversion. The launcher retries setup after an incomplete installation.
+Setup requires Python 3.11 (the script uses `py -3.11`), Git for the Transformers installation, and FFmpeg for media conversion. The compiled download also needs the Microsoft Visual C++ runtime. Rust/Cargo and the Windows C++ build tools and SDK are only needed for source builds. Use `start.ps1 -Build` to force a rebuild from a source checkout. The launcher retries setup after an incomplete installation.
 
 **A recovered recording has unfinished text:** open it, select the full recording, and press Diarize selection. If recovery reports an error, keep the session folder; its separate audio tracks may still be usable.
 

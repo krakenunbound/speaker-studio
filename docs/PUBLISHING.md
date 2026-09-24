@@ -25,7 +25,15 @@ Keep `Cargo.toml`, `VERSION`, the changelog, and version references in the guide
 
 Push only the intended release tag using `git push origin TAG-NAME`, replacing `TAG-NAME` with that tag. Create a GitHub release from that tag and describe the changes and setup requirements.
 
-For the simplest distribution, use GitHub's source archive and the documented first-run setup. Do not upload the whole working folder: it contains local dependencies and may contain recordings. A downloadable `Speaker Studio.exe` by itself is incomplete; the Python engine and its dependencies are still required. If supplying a prebuilt executable, include the matching source/setup files, user guide, and license, and explain the remaining setup requirements.
+Build the Windows download from the release source checkout:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\package-release.ps1
+```
+
+This builds the x64 MSVC executable, checks its embedded version against `VERSION`, updates the main-folder EXE, and packages an explicit list of runtime scripts, launchers, guides, and the license. It writes `Speaker-Studio-VERSION-windows-x64.zip`, the matching `.exe`, and `SHA256SUMS.txt` under `dist/`. Attach all three to the GitHub release. The ZIP is the recommended download; the EXE alone is for existing compatible installations.
+
+Verify archive contents, checksums, and first-run setup before publishing. Include the [Windows download guide](WINDOWS_DOWNLOAD.md) requirements in the release notes. This package does not bundle Python, Git, FFmpeg, the Microsoft runtime, installed speech dependencies, or models. Do not upload the whole working folder: it contains local dependencies and may contain recordings.
 
 Do not redistribute model weights or third-party runtime packages without checking their own licenses and packaging requirements. Keep release archives in the ignored `dist/` folder when preparing them locally.
 

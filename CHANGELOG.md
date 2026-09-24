@@ -1,7 +1,10 @@
 # Changes
 
-## Unreleased
+## 0.1.2
 
+- Provide a compiled Windows x64 ZIP package, an executable for upgrades, and SHA-256 checksums through GitHub Releases.
+- Reuse the supplied executable during speech-engine setup; Rust and C++ build tools are only needed when building from source. Use `start.ps1 -Build` to rebuild explicitly.
+- Keep setup errors visible when launching from the batch file.
 - Prepare the source repository for publication with MIT licensing, setup and contribution instructions, and Windows build/test automation.
 - Exclude local data, environments, caches, and release artifacts from Git.
 - Pin new Transformers installations to the tested revision and use Cargo.lock during launcher builds.

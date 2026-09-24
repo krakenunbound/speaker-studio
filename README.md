@@ -4,11 +4,19 @@
 
 Local speaker diarization and transcription for Windows. Record desktop audio and an optional microphone, import a recording, or download a video link. NVIDIA Nemotron 3 identifies speaker activity; Whisper transcribes the words. The desktop interface is written in Rust, with a local Python speech engine.
 
-Version: **0.1.1** · [User guide](docs/USER_GUIDE.md) · [Contributing](CONTRIBUTING.md) · [Changes](CHANGELOG.md) · [MIT license](LICENSE)
+Version: **0.1.2** · [User guide](docs/USER_GUIDE.md) · [Contributing](CONTRIBUTING.md) · [Changes](CHANGELOG.md) · [MIT license](LICENSE)
 
 ![Speaker Studio showing a live recording with a colored waveform, named speaker activity lanes, and a timestamped transcript](assets/speaker-studio-screenshot.png)
 
-## Requirements
+## Download for Windows
+
+**[Download Speaker Studio for Windows x64](https://github.com/krakenunbound/speaker-studio/releases/download/v0.1.2/Speaker-Studio-0.1.2-windows-x64.zip)**
+
+Extract the ZIP and run **Start Speaker Studio.bat**. The compiled app is included; no Rust or C++ build tools are needed. Python 3.11, Git, FFmpeg, and the Microsoft Visual C++ runtime are still required. First setup downloads the speech dependencies and models.
+
+Read the [Windows download guide](docs/WINDOWS_DOWNLOAD.md) for prerequisite links, installation, and updates. The [release page](https://github.com/krakenunbound/speaker-studio/releases/tag/v0.1.2) also includes the EXE for existing installations and SHA-256 checksums. This is a portable package with first-run setup, not an offline installer.
+
+## Requirements for building from source
 
 - Windows x64. Audio capture uses Windows WASAPI.
 - Python **3.11**, available through the Windows `py` launcher.
@@ -20,7 +28,7 @@ Version: **0.1.1** · [User guide](docs/USER_GUIDE.md) · [Contributing](CONTRIB
 
 The engine uses a CUDA-capable NVIDIA GPU when available and otherwise attempts CPU inference. CPU processing can be too slow for live use. Setup installs the CUDA 12.6 PyTorch packages; GPU use also requires a compatible NVIDIA driver. The current GPU path uses bfloat16 for diarization, so older GPUs may need changes to the engine. See the [troubleshooting guide](docs/USER_GUIDE.md#troubleshooting).
 
-## Quick start
+## Run from source
 
 1. Clone or download this repository into a writable folder and install the requirements above.
 2. Double-click **Start Speaker Studio.bat**. Initial setup creates `.engine`, installs dependencies, builds the app, and puts **Speaker Studio.exe** in the main folder.
@@ -28,10 +36,10 @@ The engine uses a CUDA-capable NVIDIA GPU when available and otherwise attempts 
 
 Later launches open the executable directly. Keep the `engine` and `.engine` folders alongside the executable: the executable alone is not a complete installation. Close the app before rebuilding it.
 
-To repair dependencies or rebuild after updating the source, run this from the project folder:
+To repair dependencies and rebuild after updating the source, run this from the project folder:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -Build
 ```
 
 New installations use the Transformers revision tested with this app (`98d39824ed30e684e5122d04a2d9564efffc4965`). Existing environments that pass setup verification are retained. Rust builds use `Cargo.lock`; other Python dependencies have the ranges in `engine/requirements.txt`.

@@ -1,5 +1,8 @@
+param([switch]$Build)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$app = Join-Path $projectRoot 'Speaker Studio.exe'
 $envRoot = Join-Path $projectRoot '.engine'
 $pythonExe = Join-Path $envRoot 'Scripts\python.exe'
 if (-not (Test-Path $pythonExe)) {
@@ -32,15 +35,19 @@ if (-not $ready) {
 & $pythonExe -c "import torch,faster_whisper,yt_dlp,soundfile,librosa,transformers,os; p=os.path.join(os.path.dirname(transformers.__file__),'models','nemotron3_diarization'); assert os.path.isdir(p), 'diarization model code missing'"
 if ($LASTEXITCODE -ne 0) { throw 'Speech engine verification failed. Run start.ps1 again to repair it.' }
 
-Write-Host "Building Speaker Studio."
-Push-Location $projectRoot
-try {
-    cargo build --release --locked
-    if ($LASTEXITCODE -ne 0) { throw 'Could not build Speaker Studio.' }
-    $app = Join-Path $projectRoot 'Speaker Studio.exe'
-    Copy-Item (Join-Path $projectRoot 'target\release\speaker-studio.exe') $app -Force
-    Set-Content -LiteralPath $readyMarker -Value 'ready' -Encoding Ascii
-    Start-Process $app -WindowStyle Hidden
-} finally {
-    Pop-Location
+if ($Build -or -not (Test-Path -LiteralPath $app)) {
+    Write-Host "Building Speaker Studio."
+    Push-Location $projectRoot
+    try {
+        cargo build --release --locked
+        if ($LASTEXITCODE -ne 0) { throw 'Could not build Speaker Studio.' }
+        Copy-Item (Join-Path $projectRoot 'target\release\speaker-studio.exe') $app -Force
+    } finally {
+        Pop-Location
+    }
+} else {
+    Write-Host "Using the included Speaker Studio executable."
 }
+
+Set-Content -LiteralPath $readyMarker -Value 'ready' -Encoding Ascii
+Start-Process $app -WorkingDirectory $projectRoot -WindowStyle Hidden

@@ -7,4 +7,6 @@ exit /b 0
 
 :setup
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start.ps1"
-exit /b %ERRORLEVEL%
+set "setupExit=%ERRORLEVEL%"
+if not "%setupExit%"=="0" pause
+exit /b %setupExit%

@@ -1,6 +1,6 @@
 # Contributing
 
-Use Windows x64 with the tools listed in the [README](README.md#requirements). Keep changes focused and include a regression test when fixing behavior that can be tested without audio hardware or model downloads.
+Use Windows x64 with the tools listed in the [README](README.md#requirements-for-building-from-source). Keep changes focused and include a regression test when fixing behavior that can be tested without audio hardware or model downloads.
 
 ## Run checks
 
@@ -33,6 +33,8 @@ Copy-Item -LiteralPath 'target\release\speaker-studio.exe' -Destination 'Speaker
 ```
 
 The root executable is ignored by Git. Keep `Cargo.lock` committed. New engine installations pin Transformers to a tested revision in `start.ps1`; validate Nemotron loading and streaming before changing that revision.
+
+The setup script reuses an existing executable. To force a rebuild during setup, use `powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1 -Build`. To build the downloadable ZIP, EXE, and checksums, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\package-release.ps1`; outputs go to the ignored `dist/` folder. See the [publication guide](docs/PUBLISHING.md).
 
 ## Report a problem
 
