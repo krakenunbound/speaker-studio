@@ -3,6 +3,7 @@ name = "speaker-studio"
 version = "0.1.1"
 edition = "2021"
 description = "Local speaker diarization studio"
+license = "MIT"
 
 [dependencies]
 arboard = "3"

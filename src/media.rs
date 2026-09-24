@@ -225,38 +225,10 @@ pub fn hide_window(cmd: &mut Command) {
     }
 }
 
-pub fn parse_range(header: &str, len: u64) -> Option<(u64, u64)> {
-    if len == 0 {
-        return None;
-    }
-    let rest = header.trim().strip_prefix("bytes=")?;
-    let (start, end) = rest.split_once('-')?;
-    if start.is_empty() {
-        let tail: u64 = end.parse().ok()?;
-        let start = len.saturating_sub(tail.max(1));
-        Some((start, len - 1))
-    } else {
-        let start: u64 = start.parse().ok()?;
-        let end = if end.is_empty() { len - 1 } else { end.parse::<u64>().ok()?.min(len - 1) };
-        if start >= len || start > end {
-            None
-        } else {
-            Some((start, end))
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
-
-    #[test]
-    fn range_parses_open_end() {
-        assert_eq!(parse_range("bytes=0-", 100), Some((0, 99)));
-        assert_eq!(parse_range("bytes=10-20", 100), Some((10, 20)));
-        assert_eq!(parse_range("bytes=-10", 100), Some((90, 99)));
-    }
 
     #[test]
     fn peaks_read_back_a_written_wav() {

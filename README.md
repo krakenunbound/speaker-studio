@@ -1,40 +1,67 @@
 # Speaker Studio
 
-Version: **0.1.1**. The source version is recorded in `VERSION` and `Cargo.toml`.
+<img src="assets/icon.png" alt="Speaker Studio Kraken logo" width="180">
 
-Read the [how-to guide](docs/USER_GUIDE.md), use **Help / F1** in the app, or hover over controls for tips.
+Local speaker diarization and transcription for Windows. Record desktop audio and an optional microphone, import a recording, or download a video link. NVIDIA Nemotron 3 identifies speaker activity; Whisper transcribes the words. The desktop interface is written in Rust, with a local Python speech engine.
 
-A local app for live dictation and for diarizing a video, audio file, or link. NVIDIA Nemotron 3 decides who spoke when. Whisper writes the words. Speaker names can carry a player, a character, and a role, such as `Greg - Ruthgar the Invincible - Barbarian`.
+Version: **0.1.1** · [User guide](docs/USER_GUIDE.md) · [Contributing](CONTRIBUTING.md) · [Changes](CHANGELOG.md) · [MIT license](LICENSE)
 
-## Run
+## Requirements
 
-Double-click `Start Speaker Studio.bat`. Speaker Studio opens its own window.
+- Windows x64. Audio capture uses Windows WASAPI.
+- Python **3.11**, available through the Windows `py` launcher.
+- Rust with the MSVC toolchain and Cargo.
+- Visual Studio C++ Build Tools with the Windows SDK (including `rc.exe`).
+- Git, needed to install the tested Transformers revision.
+- FFmpeg available on `PATH`, needed for media conversion.
+- An internet connection for initial dependencies, models, and video-link downloads; several gigabytes of free disk space for dependencies, models, and build output, plus recording storage.
 
-The first launch builds the Rust app and installs the speech engine into `.engine`. That download is large. Later launches open the window directly. Speech inference runs on this computer; downloading models and linked media uses the internet.
+The engine uses a CUDA-capable NVIDIA GPU when available and otherwise attempts CPU inference. CPU processing can be too slow for live use. Setup installs the CUDA 12.6 PyTorch packages; GPU use also requires a compatible NVIDIA driver. The current GPU path uses bfloat16 for diarization, so older GPUs may need changes to the engine. See the [troubleshooting guide](docs/USER_GUIDE.md#troubleshooting).
 
-Nemotron 3 was not already in the Hugging Face cache on this machine. The first diarization downloads `nvidia/Nemotron-3-Diarization`. Whisper large-v3-turbo is used from the local cache when it is present.
+## Quick start
+
+1. Clone or download this repository into a writable folder and install the requirements above.
+2. Double-click **Start Speaker Studio.bat**. Initial setup creates `.engine`, installs dependencies, builds the app, and puts **Speaker Studio.exe** in the main folder.
+3. Wait for the engine indicator to say **Nemotron**, then import a file or start **Live dictation**. Use **Help / F1** or hover over controls for instructions.
+
+Later launches open the executable directly. Keep the `engine` and `.engine` folders alongside the executable: the executable alone is not a complete installation. Close the app before rebuilding it.
+
+To repair dependencies or rebuild after updating the source, run this from the project folder:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
+```
+
+New installations use the Transformers revision tested with this app (`98d39824ed30e684e5122d04a2d9564efffc4965`). Existing environments that pass setup verification are retained. Rust builds use `Cargo.lock`; other Python dependencies have the ranges in `engine/requirements.txt`.
 
 ## What you can do
 
-- Drop a video or audio file, or choose one.
-- Paste a YouTube link or another video URL. The file is downloaded locally and then played back.
-- Select the output device and press **Live dictation**. Enable **Me** to include the Windows default microphone. Lanes and lines update while audio plays. Stopping runs a full pass over the recording.
-- Drag across the waveform to choose a range, then **Diarize selection**. Ranges expand to complete existing transcript lines so words outside a cut are preserved. Live sessions analyze the desktop track while preserving the separate microphone transcript.
-- Click a speaker name and type the longer label. It is saved with the session.
-- Copy or download the transcript.
+- Record the selected desktop output device, with a separate optional **Me** microphone track.
+- Import audio/video files or a supported video URL.
+- Follow speaker lanes and transcript lines while audio is processed.
+- Select a range and re-analyze it; ranges expand to preserve complete existing transcript lines.
+- Rename speakers and paste portraits for the current session.
+- Copy text or export a text or HTML transcript.
+- Reopen saved sessions and recover audio from interrupted live recordings.
 
-Sessions are stored in `sessions/`. The speech models run from `engine/engine.py` inside the `.engine` environment.
+Read the [step-by-step user guide](docs/USER_GUIDE.md) for controls, selection behavior, backups, and troubleshooting.
 
-Closing the window during capture finalizes the audio. Interrupted live recordings are recovered from their separate audio tracks on the next launch. Turning off **Me** stops microphone capture without hiding or removing earlier speech.
+## Models, privacy, and limitations
 
-For dependency repair, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\start.ps1`. The launcher retries setup if its completion marker or executable is missing.
+Speech inference runs locally. Setup and model downloads use the internet, as do video-link downloads. The app downloads `nvidia/Nemotron-3-Diarization` as needed. Recognition prefers a compatible Whisper model already in the usual Hugging Face cache (starting with large-v3-turbo), and falls back to downloading Whisper **base** if none is found. Set `SPEAKER_ASR_PATH` to a local faster-whisper model directory to choose a specific model.
 
-## Development
+Recordings, transcripts, and portraits are saved under `sessions/` beside the app. Stop recording and close the app before copying that folder for backup. `.gitignore` excludes sessions, installed dependencies, downloaded models, and build products. Review exports before sharing them.
 
-The local Git history starts at tag `v0.1.0`. Recordings, downloaded dependencies, build output, and executables are excluded from source control.
+Speaker numbers describe activity within a session; they are not verified identities. Overlapping voices and unclear speech can produce uncertain attribution or transcription errors. Live text follows speech by several seconds, and stopping capture runs a final analysis pass. GPU performance and recognition accuracy depend on the hardware and selected model.
 
-- Rust checks: `cargo test --locked`
-- Engine checks (no models or audio devices needed): `.\.engine\Scripts\python.exe -B -m unittest discover -s engine -p test_engine.py -v`
-- Release build: `cargo build --release --locked`, then copy `target\release\speaker-studio.exe` to `Speaker Studio.exe`.
+## Development and publication
 
-The supplied artwork is stored in `assets/`; `build.rs` embeds the Windows icon and package version using the Windows SDK resource compiler.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for tests and release builds, and the [publication checklist](docs/PUBLISHING.md) for preparing a GitHub repository or release. The Windows GitHub Actions workflow runs Rust tests, a release build, and CPU-only Python regression tests without downloading speech models.
+
+The supplied artwork is in `assets/`. `build.rs` embeds the Windows icon and the version from `Cargo.toml`. Keep `VERSION` and `Cargo.toml` in sync when releasing.
+
+## License and acknowledgments
+
+Speaker Studio is provided under the [MIT license](LICENSE). Third-party libraries and model weights retain their own licenses and terms; they are not bundled with this source repository.
+
+Built around [NVIDIA Nemotron diarization](https://huggingface.co/blog/nvidia/nemotron-diarization), [Hugging Face Transformers](https://github.com/huggingface/transformers), [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [yt-dlp](https://github.com/yt-dlp/yt-dlp), and [egui/eframe](https://github.com/emilk/egui). Media conversion uses [FFmpeg](https://ffmpeg.org/).

@@ -1,0 +1,44 @@
+name: Windows checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust tests and release build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Test
+        run: cargo +stable test --locked
+      - name: Build executable
+        run: cargo +stable build --release --locked
+
+  engine:
+    name: Python engine regression tests
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU test dependencies
+        run: |
+          python -m pip install "numpy>=1.26,<3"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Test without models or audio devices
+        run: python -B -m unittest discover -s engine -p test_engine.py -v

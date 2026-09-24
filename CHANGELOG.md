@@ -1,5 +1,12 @@
 # Changes
 
+## Unreleased
+
+- Prepare the source repository for publication with MIT licensing, setup and contribution instructions, and Windows build/test automation.
+- Exclude local data, environments, caches, and release artifacts from Git.
+- Pin new Transformers installations to the tested revision and use Cargo.lock during launcher builds.
+- Remove unused HTTP range and session-ID validation helpers left over from earlier development.
+
 ## 0.1.1
 
 - Preserve transcript boundaries and uncertain speaker labels when re-analyzing a selection; keep distinct incoming voices separate.

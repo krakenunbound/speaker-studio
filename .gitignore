@@ -1,10 +1,40 @@
+# Local speech engine, recordings, and downloaded models
 /.engine/
-/target/
 /sessions/
+/models/
+/.cache/
+
+# Rust build products and local release packages (keep Cargo.lock)
+/target/
+/dist/
 /*.exe
+/*.pdb
+/*.zip
+/*.7z
+
+# Python environments and caches
+/.venv/
+/venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local credentials and configuration
 .env
 .env.*
 !.env.example
+
+# Editor, operating-system, and temporary files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.log
+*.tmp
+*.swp
+*~

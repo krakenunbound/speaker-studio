@@ -174,10 +174,6 @@ pub fn new_id() -> String {
     Uuid::new_v4().to_string().replace('-', "").chars().take(12).collect()
 }
 
-pub fn valid_id(id: &str) -> bool {
-    id.len() == 12 && id.chars().all(|c| c.is_ascii_hexdigit())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,7 +4,7 @@ $envRoot = Join-Path $projectRoot '.engine'
 $pythonExe = Join-Path $envRoot 'Scripts\python.exe'
 if (-not (Test-Path $pythonExe)) {
     py -3.11 -m venv $envRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Could not create the speech engine. Install Python 3.11 or newer and try again.' }
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the speech engine. Install Python 3.11 and try again.' }
 }
 
 $readyMarker = Join-Path $envRoot 'speaker-studio-ready'
@@ -23,7 +23,8 @@ if (-not $ready) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not install the CUDA audio runtime.' }
     & $pythonExe -m pip install -r (Join-Path $projectRoot 'engine\requirements.txt')
     if ($LASTEXITCODE -ne 0) { throw 'Could not install the speech packages.' }
-    & $pythonExe -m pip install "transformers @ git+https://github.com/huggingface/transformers.git"
+    # Use the revision tested with this app rather than a changing development branch.
+    & $pythonExe -m pip install "transformers @ git+https://github.com/huggingface/transformers.git@98d39824ed30e684e5122d04a2d9564efffc4965"
     if ($LASTEXITCODE -ne 0) { throw 'Could not install Nemotron 3 support from transformers.' }
 }
 
@@ -34,7 +35,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Speech engine verification failed. Run start.p
 Write-Host "Building Speaker Studio."
 Push-Location $projectRoot
 try {
-    cargo build --release
+    cargo build --release --locked
     if ($LASTEXITCODE -ne 0) { throw 'Could not build Speaker Studio.' }
     $app = Join-Path $projectRoot 'Speaker Studio.exe'
     Copy-Item (Join-Path $projectRoot 'target\release\speaker-studio.exe') $app -Force
