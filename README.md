@@ -6,6 +6,8 @@ Local speaker diarization and transcription for Windows. Record desktop audio an
 
 Version: **0.1.1** · [User guide](docs/USER_GUIDE.md) · [Contributing](CONTRIBUTING.md) · [Changes](CHANGELOG.md) · [MIT license](LICENSE)
 
+![Speaker Studio showing a live recording with a colored waveform, named speaker activity lanes, and a timestamped transcript](assets/speaker-studio-screenshot.png)
+
 ## Requirements
 
 - Windows x64. Audio capture uses Windows WASAPI.
