@@ -1,0 +1,38 @@
+$ErrorActionPreference = 'Stop'
+$projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$envRoot = Join-Path $projectRoot '.engine'
+$pythonExe = Join-Path $envRoot 'Scripts\python.exe'
+if (-not (Test-Path $pythonExe)) {
+    py -3.11 -m venv $envRoot
+    if ($LASTEXITCODE -ne 0) { throw 'Could not create the speech engine. Install Python 3.11 or newer and try again.' }
+}
+
+$ready = $false
+try {
+    & $pythonExe -c "import torch,faster_whisper,yt_dlp,soundfile,librosa,transformers,os; p=os.path.join(os.path.dirname(transformers.__file__),'models','nemotron3_diarization'); assert os.path.isdir(p), 'diarization model code missing'"
+    if ($LASTEXITCODE -eq 0) { $ready = $true }
+} catch { $ready = $false }
+
+if (-not $ready) {
+    Write-Host "Installing the local speech engine. The first run downloads PyTorch and Nemotron support."
+    & $pythonExe -m pip install --upgrade pip
+    if ($LASTEXITCODE -ne 0) { throw 'Could not update pip.' }
+    & $pythonExe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install the CUDA audio runtime.' }
+    & $pythonExe -m pip install -r (Join-Path $projectRoot 'engine\requirements.txt')
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install the speech packages.' }
+    & $pythonExe -m pip install "transformers @ git+https://github.com/huggingface/transformers.git"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not install Nemotron 3 support from transformers.' }
+}
+
+Write-Host "Building Speaker Studio."
+Push-Location $projectRoot
+try {
+    cargo build --release
+    if ($LASTEXITCODE -ne 0) { throw 'Could not build Speaker Studio.' }
+    $app = Join-Path $projectRoot 'Speaker Studio.exe'
+    Copy-Item (Join-Path $projectRoot 'target\release\speaker-studio.exe') $app -Force
+    Start-Process $app
+} finally {
+    Pop-Location
+}
