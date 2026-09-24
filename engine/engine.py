@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import traceback
+from collections import deque
 from pathlib import Path
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -30,7 +31,8 @@ def log(message: str) -> None:
 
 class AudioBuf:
     def __init__(self) -> None:
-        self.blocks: list = []
+        self.blocks = deque()
+        self.base = 0
         self.total = 0
 
     def append(self, pcm) -> None:
@@ -41,9 +43,28 @@ class AudioBuf:
             return
         self.blocks.append(pcm)
         self.total += int(pcm.size)
-        if len(self.blocks) > 48:
-            joined = np.concatenate(self.blocks)
-            self.blocks = [joined]
+
+    def discard_before(self, start: int) -> None:
+        """Release consumed samples without changing the absolute recording clock."""
+        start = min(self.total, max(self.base, int(start)))
+        while self.blocks and self.base + len(self.blocks[0]) <= start:
+            self.base += len(self.blocks.popleft())
+        if self.blocks and self.base < start:
+            # Copy the retained suffix so it does not keep a large old block alive.
+            self.blocks[0] = self.blocks[0][start - self.base :].copy()
+            self.base = start
+
+    def append_silence(self, samples: int) -> None:
+        """Skip a known muted interval, retaining one second of ASR context."""
+        import numpy as np
+
+        samples = max(0, int(samples))
+        if samples <= 16000:
+            self.append(np.zeros(samples, dtype=np.float32))
+        else:
+            self.total += samples
+            self.base = self.total - 16000
+            self.blocks = deque([np.zeros(16000, dtype=np.float32)])
 
     def slice(self, start: int, end: int):
         import numpy as np
@@ -52,8 +73,10 @@ class AudioBuf:
         end = min(self.total, int(end))
         if end <= start:
             return np.zeros(0, dtype=np.float32)
+        if start < self.base:
+            raise ValueError(f"Audio before sample {self.base} has already been consumed")
         out = np.empty(end - start, dtype=np.float32)
-        pos = 0
+        pos = self.base
         filled = 0
         for block in self.blocks:
             b0 = pos
@@ -177,7 +200,16 @@ def speaker_owner(start: float, end: float, segments: list[dict]) -> int:
     if len(ranked) > 1:
         second = ranked[1][1]
         if second >= 0.05 and best_overlap < 0.7 * (best_overlap + second):
-            return OVERLAP
+            # A word straddling a speaker change is ambiguous, but does not
+            # imply that those people actually spoke at the same time.
+            second_speaker = ranked[1][0]
+            first_intervals = [(max(start, float(s["start"])), min(end, float(s["end"])))
+                               for s in segments if int(s["speaker"]) == best_speaker]
+            second_intervals = [(max(start, float(s["start"])), min(end, float(s["end"])))
+                                for s in segments if int(s["speaker"]) == second_speaker]
+            simultaneous = sum(max(0.0, min(a1, b1) - max(a0, b0))
+                               for a0, a1 in first_intervals for b0, b1 in second_intervals)
+            return OVERLAP if simultaneous >= 0.05 else UNASSIGNED
     return int(best_speaker)
 
 
@@ -515,7 +547,11 @@ class Engine:
         with torch.inference_mode():
             outputs = self.model(**batch, **kwargs)
         state["cache"] = getattr(outputs, "speaker_cache", None)
-        state["logits"].append(outputs.logits.detach().float().cpu())
+        logits = outputs.logits.detach().float().cpu()
+        mask = batch.get("attention_mask")
+        if mask is not None:
+            logits = logits.masked_fill(~mask[:, : logits.shape[1]].detach().cpu().bool()[..., None], float("-inf"))
+        state["logits"].append(logits)
         state["step"] += 1
 
     def drain_live(self, state: dict, last: bool) -> None:
@@ -554,7 +590,6 @@ class Engine:
 
     def absorb_words(self, track: dict, tag: str, force: bool) -> bool:
         import numpy as np
-        import soundfile as sf
 
         duration = track["buf"].total / 16000
         lag = 4.0
@@ -563,26 +598,18 @@ class Engine:
             return False
         if duration < 1.0 and not force:
             return False
-        start_t = max(0.0, track["committed"] - 1.0)
+        start_sample = max(track["buf"].base, 0, int(round((track["committed"] - 1.0) * 16000)))
+        start_t = start_sample / 16000.0
         end_t = duration if force else min(duration, start_t + window)
         cutoff = end_t if force else min(end_t, max(start_t, duration - lag))
-        if cutoff <= start_t + 0.25:
+        if cutoff <= start_t or (not force and cutoff <= start_t + 0.25):
             return False
         track["asr_at"] = duration
-        clip = track["buf"].slice(int(start_t * 16000), int(end_t * 16000))
+        clip = track["buf"].slice(start_sample, int(round(end_t * 16000)))
         if clip.size < 1600:
             return False
-        temp = Path(os.environ.get("TEMP", ".")) / f"speaker-live-{tag}.wav"
-        sf.write(temp, np.asarray(clip, dtype=np.float32), 16000)
         prompt = " ".join(word["text"] for word in track["words"][-20:])[-180:]
-        try:
-            words = self.transcribe(str(temp), start_t, live=True, prompt=prompt)
-        finally:
-            try:
-                temp.unlink(missing_ok=True)
-            except TypeError:
-                if temp.exists():
-                    temp.unlink()
+        words = self.transcribe(np.asarray(clip, dtype=np.float32), start_t, live=True, prompt=prompt)
         fresh = [
             word
             for word in words
@@ -609,7 +636,11 @@ class Engine:
         elif not retry:
             cursor = cutoff
             track["gap_retries"] = 0
-        if retry:
+        if force:
+            # There is no future update to retry after a stop or a mute gap.
+            cursor = cutoff
+            track["gap_retries"] = 0
+        elif retry:
             cursor = track["committed"]
         track["words"] = keep_recognized(track["words"], fresh, track["committed"], cursor, cutoff)
         track["committed"] = max(track["committed"], cursor)
@@ -649,24 +680,41 @@ class Engine:
         return shown
 
     def party_segments(self, track: dict) -> list[dict]:
-        import torch
+        import numpy as np
 
-        step = track["step"]
-        if track.get("seg_step") == step and track.get("seg_cache") is not None:
+        if not track["logits"] and track.get("seg_cache") is not None:
             return track["seg_cache"]
-        pending = track["logits"]
-        logits = track.get("logit_cat")
-        if pending:
-            piece = torch.cat(pending, dim=1) if len(pending) > 1 else pending[0]
-            logits = piece if logits is None else torch.cat([logits, piece], dim=1)
-            track["logits"] = []
-            track["logit_cat"] = logits
-        if logits is None:
-            segments = []
-        else:
-            segments = [segment for segment in self.segments_from_logits(logits) if int(segment["speaker"]) < 8]
+        finished = track.setdefault("segments_finished", [])
+        opened = track.setdefault("segments_open", {})
+        frame = track.get("segment_frames", 0)
+        for piece in track["logits"]:
+            if hasattr(piece, "detach"):
+                piece = piece.detach().float().cpu().numpy()
+            values = np.asarray(piece)
+            if values.ndim == 3:
+                values = values[0]
+            # Nemotron emits raw logits every 10 ms. This is exactly its
+            # processor's sigmoid(logit) > 0.5 test, without retaining history.
+            active = values > 0.0
+            for speaker in range(min(8, active.shape[1])):
+                previous = speaker in opened
+                changes = np.diff(np.r_[int(previous), active[:, speaker].astype(np.int8)])
+                for index in np.flatnonzero(changes):
+                    at = frame + int(index)
+                    if changes[index] > 0:
+                        opened[speaker] = at
+                    else:
+                        start = opened.pop(speaker)
+                        if at - start >= 5:
+                            finished.append({"speaker": speaker, "start": round(start * HOP, 3), "end": round(at * HOP, 3)})
+            frame += values.shape[0]
+        track["logits"] = []
+        track["segment_frames"] = frame
+        segments = list(finished)
+        segments.extend({"speaker": speaker, "start": round(start * HOP, 3), "end": round(frame * HOP, 3)}
+                        for speaker, start in opened.items() if frame - start >= 5)
+        segments.sort(key=lambda segment: (segment["start"], segment["speaker"]))
         track["seg_cache"] = segments
-        track["seg_step"] = step
         return segments
 
     def turns_for_speaker(self, words: list[dict], speaker: int) -> list[dict]:
@@ -690,27 +738,50 @@ class Engine:
         segments = list(party)
         segments.extend(self.mic_activity(mic))
         duration = max(desktop["buf"].total, mic["buf"].total) / 16000.0
-        edge = max(0.0, duration - LIVE_RETAIN)
-        prior = [row for row in desktop.get("assigned", []) if float(row["end"]) < edge]
-        recent = [word for word in desktop["words"] if float(word["end"]) >= edge]
-        recent_segments = [segment for segment in party if float(segment["end"]) >= edge - 1.0]
-        prior.extend(assign_speakers(recent, recent_segments))
-        desktop["assigned"] = prior
-        turns = rows_to_turns(prior)
+        edge = max(0.0, desktop["buf"].total / 16000.0 - LIVE_RETAIN)
+        key = lambda word: (float(word["start"]), float(word["end"]), word["text"])
+        cached = desktop.get("assigned_cache", {})
+        pending = [word for word in desktop["words"] if float(word["end"]) >= edge or key(word) not in cached]
+        cached.update((key(row), row) for row in assign_speakers(pending, party))
+        # Build from the current recognition set: revisions remove stale entries,
+        # while newly recognized old words are assigned regardless of their age.
+        desktop["assigned_cache"] = {key(word): cached[key(word)] for word in desktop["words"]}
+        assigned = [cached[key(word)] for word in desktop["words"]]
+        turns = rows_to_turns(assigned)
         turns.extend(self.turns_for_speaker(mic["words"], 8))
         turns.sort(key=lambda turn: (turn["start"], turn["speaker"]))
         emit({"event": "live", "job": job, "segments": segments, "turns": turns, "duration": round(duration, 3)})
 
     def mic_pad(self, cmd: dict) -> None:
-        import numpy as np
-
         samples = int(round(float(cmd.get("seconds") or 0.0) * 16000))
         if samples <= 0:
             return
         state = self.live.get(cmd.get("job"))
         if state is None or "mic" not in state:
             return
-        state["mic"]["buf"].append(np.zeros(samples, dtype=np.float32))
+        track = state["mic"]
+        self.absorb_words(track, f"{cmd['job']}-mic", True)
+        self.mic_activity(track)
+        opened = track.get("energy_open")
+        end = track["buf"].total / 16000.0
+        if opened is not None and end - opened >= 0.08:
+            track["energy_segments"].append({"speaker": 8, "start": round(opened, 3), "end": round(end, 3)})
+        track["energy_open"] = None
+        track["buf"].append_silence(samples)
+        track["energy_sample"] = track["buf"].total
+        track["committed"] = track["buf"].total / 16000.0
+        track["asr_at"] = track["committed"]
+        track["gap_retries"] = 0
+
+    def trim_track(self, track: dict, *, mic: bool) -> None:
+        keep = max(0, int(round((track["committed"] - 1.0) * 16000)))
+        if mic:
+            keep = min(keep, int(track.get("energy_sample", 0)))
+        elif track["step"] == 0:
+            keep = 0
+        elif track["mel"] is not None:
+            keep = min(keep, int(self.processor.audio_chunk_start(track["mel"])))
+        track["buf"].discard_before(keep)
 
     def live_pcm(self, cmd: dict) -> None:
         import base64
@@ -731,6 +802,7 @@ class Engine:
             if duration - track["shown_at"] >= 1.0:
                 track["shown_at"] = duration
                 self.publish_merged(job)
+            self.trim_track(track, mic=True)
             return
         before = track["step"]
         self.drain_live(track, False)
@@ -738,6 +810,7 @@ class Engine:
         if track["step"] != before or duration - track["shown_at"] >= 1.0:
             track["shown_at"] = duration
             self.publish_merged(job)
+        self.trim_track(track, mic=False)
 
     def live_stop(self, cmd: dict) -> None:
         job = cmd["job"]

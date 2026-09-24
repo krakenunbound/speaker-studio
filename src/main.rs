@@ -172,6 +172,7 @@ struct Studio {
     engine: EngineInfo,
     logs: Vec<String>,
     log_open: bool,
+    help_open: bool,
     page: Page,
     url: String,
     sel_start: f64,
@@ -206,9 +207,13 @@ fn main() -> eframe::Result {
     if !claim_single_instance() {
         return Ok(());
     }
+    let icon = image::load_from_memory(include_bytes!("../assets/icon.png"))
+        .expect("embedded application icon").into_rgba8();
+    let (width, height) = icon.dimensions();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Speaker Studio")
+            .with_icon(egui::IconData { rgba: icon.into_raw(), width, height })
             .with_inner_size([1480.0, 940.0])
             .with_min_inner_size([1100.0, 720.0])
             .with_drag_and_drop(true),
@@ -227,6 +232,15 @@ impl Studio {
             if matches!(session.status.as_str(), "live" | "working" | "downloading") {
                 session.status = "ready".into();
                 session.message = "This was interrupted. Diarize it again when you want.".into();
+                if session.kind == "live" {
+                    match recover_live_audio(&root, session) {
+                        Ok(()) => session.message = "Recording recovered. Diarize it again to finish the transcript.".into(),
+                        Err(error) => {
+                            session.status = "error".into();
+                            session.message = format!("Could not recover the recording: {error}");
+                        }
+                    }
+                }
                 if let Err(error) = session.save(&root) {
                     save_warning = format!("Could not save this session ({error}).");
                 }
@@ -247,6 +261,7 @@ impl Studio {
             engine: EngineInfo::default(),
             logs: Vec::new(),
             log_open: false,
+            help_open: false,
             page: Page::Studio,
             url: String::new(),
             sel_start: 0.0,
@@ -406,7 +421,10 @@ impl Studio {
                     } else {
                         "Party on the desktop audio. Microphone is off. Words appear a few seconds later.".into()
                     };
-                    self.store(session);
+                    // Persist on the regular capture save interval, not on every live event.
+                    if let Some(existing) = self.sessions.iter_mut().find(|item| item.id == job) {
+                        *existing = session;
+                    }
                 }
             }
             AppMsg::Failed { job, message } => {
@@ -594,20 +612,24 @@ impl Studio {
         let desktop = dir.join("desktop.wav");
         let mic = dir.join("mic.wav");
         let audio = dir.join("audio.wav");
-        let _ = mix_wavs(&desktop, &mic, &audio);
+        let mix_error = mix_wavs(&desktop, &mic, &audio).err();
         if let Some(mut session) = self.sessions.iter().find(|session| session.id == id).cloned() {
             if let Ok((duration, peaks)) = media::peaks_from_wav(&audio, 2000) {
                 session.duration = duration;
                 session.peaks = peaks;
             }
-            session.status = "working".into();
-            session.message = "Separating you from the party".into();
+            session.status = if mix_error.is_some() { "error" } else { "working" }.into();
+            session.message = mix_error.clone().unwrap_or_else(|| "Separating you from the party".into());
             if self.current.as_deref() == Some(id.as_str()) {
                 self.sel_end = session.duration;
             }
             self.store(session);
         }
         self.send_cmd(serde_json::json!({"cmd": "live_stop", "job": id}));
+        if let Some(error) = mix_error {
+            self.toast(format!("Could not finalize the recording: {error}"));
+            return;
+        }
         self.send_cmd(serde_json::json!({
             "cmd": "refine_sources",
             "job": id,
@@ -662,21 +684,36 @@ impl Studio {
             self.toast("Open a recording first.");
             return;
         };
+        if session.status == "working" || session.status == "downloading" {
+            self.toast("Wait for this session's current analysis to finish.");
+            return;
+        }
         let audio = session.dir(&self.root).join("audio.wav");
         if !audio.exists() {
             self.toast("This session has no audio yet.");
             return;
         }
-        let start = self.sel_start.max(0.0);
-        let end = self.sel_end.max(start);
+        let (start, end) = selection_range(&session, self.sel_start, self.sel_end);
+        if end <= start {
+            self.toast("Select a range with a nonzero duration.");
+            return;
+        }
         let full = start <= 0.05 && end >= session.duration - 0.05;
         session.status = "working".into();
         session.message = if full { "Diarizing with Nemotron 3".into() } else { "Diarizing the selection".into() };
         let id = session.id.clone();
+        let live = session.kind == "live";
+        let dir = session.dir(&self.root);
         self.store(session);
+        if live && full {
+            self.send_cmd(serde_json::json!({"cmd": "refine_sources", "job": id,
+                "desktop": dir.join("desktop.wav"), "mic": dir.join("mic.wav")}));
+            return;
+        }
         let start_arg = if full { None } else { Some(start) };
         let end_arg = if full { None } else { Some(end) };
-        self.queue_diarize(&id, &audio, start_arg, end_arg);
+        let source = if live { dir.join("desktop.wav") } else { audio };
+        self.queue_diarize(&id, &source, start_arg, end_arg);
     }
 
     fn play(&mut self) {
@@ -832,7 +869,7 @@ impl Studio {
 
     fn visible(&self, speaker: u8) -> bool {
         match speaker {
-            ME => self.mic_enabled,
+            ME => true,
             OVERLAP_SPEAKER | UNASSIGNED_SPEAKER => true,
             _ => speaker < self.max_speakers,
         }
@@ -953,9 +990,18 @@ impl Studio {
 }
 
 impl eframe::App for Studio {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if self.capturing() {
+            self.stop_live();
+        }
+        self.stop_playback();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain(ctx);
-        ctx.request_repaint_after(Duration::from_millis(33));
+        ctx.request_repaint_after(Duration::from_millis(
+            if self.capturing() || self.play_origin.is_some() { 33 } else { 250 }
+        ));
         let dropped: Vec<PathBuf> = ctx.input(|input| {
             input.raw.dropped_files.iter().filter_map(|file| file.path.clone()).collect()
         });
@@ -977,6 +1023,9 @@ impl eframe::App for Studio {
         if !ctx.wants_keyboard_input() && ctx.input(|input| input.key_pressed(Key::Space)) {
             if self.paused { self.play(); } else { self.pause(); }
         }
+        if ctx.input(|input| input.key_pressed(Key::F1)) {
+            self.help_open = !self.help_open;
+        }
         egui::TopBottomPanel::top("bar").exact_height(58.0).show(ctx, |ui| self.top_bar(ui));
         if self.log_open {
             egui::SidePanel::left("log").exact_width(340.0).show(ctx, |ui| self.log_panel(ui));
@@ -985,6 +1034,25 @@ impl eframe::App for Studio {
             Page::Studio => self.studio_page(ui, ctx),
             Page::Sessions => self.sessions_page(ui),
         });
+        egui::Window::new("How to use Speaker Studio").open(&mut self.help_open)
+            .default_width(560.0).resizable(true).show(ctx, |ui| {
+                ScrollArea::vertical().max_height(520.0).show(ui, |ui| {
+                    for (title, body) in [
+                        ("Record a conversation", "Choose the output device your meeting or browser uses, then press Live dictation. Enable Me to include the Windows default microphone. Headphones help keep other voices out of your microphone."),
+                        ("Finish and review", "Press Stop dictation and let the full analysis finish. Playback Stop only stops playback. Closing while recording saves the audio; reopen and run Diarize selection to finish an interrupted transcript."),
+                        ("Open an existing recording", "Drop an audio or video file, choose a file, or paste a full video URL and press Open. Imported recordings are analyzed automatically. Models and link downloads need internet access; analysis runs locally."),
+                        ("Select and replay", "Click the waveform or a transcript line to seek. Drag across the main waveform to select a range, or edit Start and End in seconds. Space toggles playback when you are not typing. Playback continues beyond a selected range."),
+                        ("Improve a selected section", "After recording stops, press Diarize selection. Analysis expands to complete existing transcript lines to preserve surrounding words. Live sessions preserve your separate microphone transcript. Show speakers filters display and exports; it does not change model detection."),
+                        ("Name people and add pictures", "Click a speaker name to edit it, then click away to save. Use Paste beside a speaker for a copied image, or select a portrait and drop an image. Names and pictures belong to this session."),
+                        ("Understand the labels", "Me is your microphone. Turning it off keeps earlier speech visible and saved. Overlap marks simultaneous voices; Unassigned means there is no confident speaker assignment. Words appear several seconds after speech."),
+                        ("Share and troubleshoot", "Copy text copies the selected range. Download saves the full text transcript. Export page saves a standalone HTML transcript with portraits. Sessions reopens recordings; Log shows engine errors. The detailed guide is docs/USER_GUIDE.md in the app folder."),
+                    ] {
+                        ui.heading(title);
+                        ui.label(body);
+                        ui.add_space(10.0);
+                    }
+                });
+            });
         if !self.toast.is_empty() {
             egui::TopBottomPanel::bottom("toast").show(ctx, |ui| {
                 ui.colored_label(TEXT, &self.toast);
@@ -997,17 +1065,21 @@ impl Studio {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
             ui.label(RichText::new("SPEAKER STUDIO").color(CYAN).strong());
+            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).color(DIM).size(10.0));
             ui.add_space(12.0);
             if ui.selectable_label(matches!(self.page, Page::Studio), "Studio").clicked() {
                 self.page = Page::Studio;
             }
-            if ui.selectable_label(matches!(self.page, Page::Sessions), "Sessions").clicked() {
+            if ui.selectable_label(matches!(self.page, Page::Sessions), "Sessions").on_hover_text("Open or delete saved recordings. Switching sessions does not stop a live recording.").clicked() {
                 self.page = Page::Sessions;
+            }
+            if ui.button("Help").on_hover_text("Open the how-to guide (F1).").clicked() {
+                self.help_open = true;
             }
             ui.add_space(8.0);
             pill(ui, &self.engine);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.selectable_label(self.log_open, "Log").clicked() {
+                if ui.selectable_label(self.log_open, "Log").on_hover_text("Show speech-engine progress and error messages.").clicked() {
                     self.log_open = !self.log_open;
                 }
                 ui.label(RichText::new("LOCAL NEMOTRON DIARIZATION").color(DIM).size(10.0));
@@ -1049,7 +1121,7 @@ impl Studio {
                     ui.label(RichText::new("SOURCE").color(DIM).size(11.0));
                     ui.label(RichText::new("Drop a video or audio file").strong().size(18.0));
                     ui.label(RichText::new("MP4, MKV, WebM, MOV, WAV, MP3, M4A. It stays on this computer.").color(MUTED));
-                    if ui.button("Choose a file").clicked() {
+                    if ui.button("Choose a file").on_hover_text("Import an audio or video recording and analyze it automatically.").clicked() {
                         if let Some(path) = rfd::FileDialog::new()
                             .add_filter("Media", &["mp4", "mkv", "webm", "mov", "wav", "mp3", "m4a", "flac", "ogg", "m4v", "avi"])
                             .pick_file()
@@ -1061,18 +1133,18 @@ impl Studio {
                 card(&mut columns[1], |ui| {
                     ui.label(RichText::new("LINK").color(DIM).size(11.0));
                     ui.label(RichText::new("YouTube or a video URL").strong().size(18.0));
-                    ui.add(TextEdit::singleline(&mut self.url).desired_width(f32::INFINITY));
+                    ui.add(TextEdit::singleline(&mut self.url).desired_width(f32::INFINITY)).on_hover_text("Paste a complete http or https video URL. Open downloads a local copy.");
                     ui.horizontal(|ui| {
-                        if ui.add(primary("Open")).clicked() {
+                        if ui.add(primary("Open")).on_hover_text("Download and analyze the linked recording. Live dictation instead records audio currently playing on your computer.").clicked() {
                             self.open_link();
                         }
                         let live = self.capturing();
                         let label = if live { "Stop dictation" } else { "Live dictation" };
-                        if ui.add(primary(label)).clicked() {
+                        if ui.add(primary(label)).on_hover_text(if live { "Finish recording and run a full transcript pass." } else { "Record the selected output device. Enable Me to also record your microphone." }).clicked() {
                             self.toggle_live();
                         }
                         let mut mic_on = self.mic_enabled;
-                        if ui.checkbox(&mut mic_on, "Me").changed() {
+                        if ui.checkbox(&mut mic_on, "Me").on_hover_text("Include the Windows default microphone as Me. Turning this off preserves earlier microphone speech.").changed() {
                             self.set_mic_enabled(mic_on);
                         }
                     });
@@ -1081,7 +1153,7 @@ impl Studio {
             ui.add_space(8.0);
             card(ui, |ui| {
                 ui.label(RichText::new("OUTPUT").color(DIM).size(11.0));
-                ui.label(RichText::new("Which headphones or speakers Live dictation captures").color(MUTED));
+                ui.label(RichText::new("Which headphones or speakers Live dictation captures").color(MUTED)).on_hover_text("Choose the device used by your meeting, game, or browser. This selects the recording source; it does not change playback routing.");
                 let selected = self.output_device_name();
                 let devices = self.output_devices.clone();
                 egui::ComboBox::from_id_salt("output-device").selected_text(selected).width(420.0).show_ui(ui, |ui| {
@@ -1137,7 +1209,7 @@ impl Studio {
                     ui.image((texture.id(), Vec2::new(480.0, 270.0)));
                 }
             }
-            let split = self.mic_enabled && !party_peaks.is_empty();
+            let split = !mic_peaks.is_empty() && !party_peaks.is_empty();
             let (rect, response) = if split {
                 ui.label(RichText::new("PARTY").color(DIM).size(11.0));
                 let (party_rect, party_response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 78.0), Sense::click_and_drag());
@@ -1145,7 +1217,7 @@ impl Studio {
                 paint_wave(ui, party_rect, &party_peaks, &party_segments, max_speakers, self.sel_start, self.sel_end, self.position(), duration);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("ME").color(voice_color(8)).size(11.0));
-                    if ui.button("Turn off").clicked() {
+                    if ui.button("Turn off").on_hover_text("Stop microphone capture and keep earlier speech.").clicked() {
                         self.set_mic_enabled(false);
                     }
                 });
@@ -1158,6 +1230,7 @@ impl Studio {
                 paint_wave(ui, rect, &peaks, &segments, max_speakers, self.sel_start, self.sel_end, self.position(), duration);
                 (rect, response)
             };
+            let response = response.on_hover_text("Click to seek and select the whole recording. Drag to select a time range for copying or re-analysis.");
             if response.drag_started() {
                 self.anchor = time_at(rect, response.interact_pointer_pos().unwrap_or(rect.left_top()), duration);
             }
@@ -1180,30 +1253,30 @@ impl Studio {
     fn transport(&mut self, ui: &mut egui::Ui) {
         let duration = self.session().map(|session| session.duration).unwrap_or(0.0);
         ui.horizontal(|ui| {
-            if ui.button("Play").clicked() { self.play(); }
-            if ui.button("Pause").clicked() { self.pause(); }
-            if ui.button("Stop").clicked() {
+            if ui.button("Play").on_hover_text("Play or resume from the current position. Space also toggles playback.").clicked() { self.play(); }
+            if ui.button("Pause").on_hover_text("Pause playback while keeping your position.").clicked() { self.pause(); }
+            if ui.button("Stop").on_hover_text("Stop playback and return to the selection start. Use Stop dictation to finish recording.").clicked() {
                 let start = self.sel_start;
                 self.stop_playback();
                 self.play_at = start;
             }
             ui.label("Start");
-            ui.add(DragValue::new(&mut self.sel_start).speed(0.1).range(0.0..=duration.max(0.0)).fixed_decimals(1));
+            ui.add(DragValue::new(&mut self.sel_start).speed(0.1).range(0.0..=duration.max(0.0)).fixed_decimals(1)).on_hover_text("Selection start in seconds. Drag the value or type a number.");
             ui.label("End");
-            ui.add(DragValue::new(&mut self.sel_end).speed(0.1).range(0.0..=duration.max(0.0)).fixed_decimals(1));
+            ui.add(DragValue::new(&mut self.sel_end).speed(0.1).range(0.0..=duration.max(0.0)).fixed_decimals(1)).on_hover_text("Selection end in seconds. Used for Copy text and Diarize selection.");
             ui.label("Show speakers");
             let previous = self.max_speakers;
-            ui.add(DragValue::new(&mut self.max_speakers).range(1..=8));
+            ui.add(DragValue::new(&mut self.max_speakers).range(1..=8)).on_hover_text("Show the first N detected desktop speakers. Also filters exports. Me and uncertain labels remain included; model detection is unchanged.");
             if self.max_speakers != previous {
                 if let Some(mut session) = self.session().cloned() {
                     session.max_speakers = self.max_speakers;
                     self.store(session);
                 }
             }
-            if ui.add(primary("Diarize selection")).clicked() { self.diarize_selection(); }
-            if ui.button("Copy text").clicked() { self.copy_text(ui.ctx()); }
-            if ui.button("Download").clicked() { self.download_text(); }
-            if ui.button("Export page").clicked() { self.export_page(); }
+            if ui.add(primary("Diarize selection")).on_hover_text("Re-analyze the selected audio after capture stops. The range expands to complete existing transcript lines to preserve surrounding words.").clicked() { self.diarize_selection(); }
+            if ui.button("Copy text").on_hover_text("Copy transcript lines touching the selected time range, including Me.").clicked() { self.copy_text(ui.ctx()); }
+            if ui.button("Download").on_hover_text("Save the full text transcript for the shown speakers, including Me.").clicked() { self.download_text(); }
+            if ui.button("Export page").on_hover_text("Save a standalone HTML transcript with speaker names and portraits. Audio is not embedded.").clicked() { self.export_page(); }
         });
         if self.sel_end < self.sel_start {
             self.sel_end = self.sel_start;
@@ -1268,15 +1341,15 @@ impl Studio {
                                         self.save_name();
                                     }
                                 }
-                            } else if ui.add(Button::new(RichText::new(name).color(color)).frame(false)).clicked() {
+                            } else if ui.add(Button::new(RichText::new(name).color(color)).frame(false)).on_hover_text("Click to rename this speaker. Click away to save; Escape cancels.").clicked() {
                                 self.renaming = Some(*speaker);
                                 self.rename_text = name.clone();
                             }
-                            if ui.button("Paste").clicked() {
+                            if ui.button("Paste").on_hover_text("Use an image from the clipboard as this speaker's portrait.").clicked() {
                                 self.portrait_speaker = Some(*speaker);
                                 self.paste_portrait();
                             }
-                            if *speaker == 8 && ui.button("Turn off").clicked() {
+                            if *speaker == 8 && ui.button("Turn off").on_hover_text("Stop microphone capture without hiding or deleting earlier speech.").clicked() {
                                 self.set_mic_enabled(false);
                             }
                             let (track, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
@@ -1330,7 +1403,7 @@ impl Studio {
                                     ui.label(RichText::new(stamp(turn.start)).color(DIM).size(11.0));
                                 });
                             });
-                            if ui.add(Button::new(RichText::new(&turn.text).color(TEXT)).frame(false).wrap()).clicked() {
+                            if ui.add(Button::new(RichText::new(&turn.text).color(TEXT)).frame(false).wrap()).on_hover_text("Seek to this line. Press Play to listen if playback is paused.").clicked() {
                                 self.seek(turn.start);
                             }
                         });
@@ -1368,7 +1441,7 @@ impl Studio {
                             ui.label(RichText::new(format!("{message} · {}", stamp(duration))).color(MUTED).size(12.0));
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Delete").clicked() {
+                            if ui.button("Delete").on_hover_text("Permanently delete this saved session and its local media. There is no undo.").clicked() {
                                 self.delete_session(&id);
                             }
                             if ui.button("Open").clicked() {
@@ -1960,6 +2033,7 @@ fn mix_wavs(desktop: &Path, mic: &Path, output: &Path) -> Result<(), String> {
         if status.success() {
             return Ok(());
         }
+        return Err(format!("Could not mix desktop and microphone audio ({status}). Separate recordings are preserved."));
     }
     let source = if desktop_ok { desktop } else if mic_ok { mic } else { return Err("No audio was captured.".into()) };
     std::fs::copy(source, output).map_err(|error| error.to_string())?;
@@ -1970,72 +2044,121 @@ fn overlaps_time(start: f64, end: f64, range_start: f64, range_end: f64) -> bool
     end > range_start && start < range_end
 }
 
+// Expand to complete transcript turns because stored turns have no per-word timestamps.
+// Adjacent turns are untouched; overlapping turns may extend the range transitively.
+fn selection_range(session: &Session, start: f64, end: f64) -> (f64, f64) {
+    let mut start = start.clamp(0.0, session.duration.max(0.0));
+    let mut end = end.clamp(start, session.duration.max(start));
+    if end <= start {
+        return (start, end);
+    }
+    loop {
+        let before = (start, end);
+        for turn in session.turns.iter().filter(|turn| turn.speaker != ME) {
+            if overlaps_time(turn.start, turn.end, start, end) {
+                start = start.min(turn.start.max(0.0));
+                end = end.max(turn.end.min(session.duration));
+            }
+        }
+        if before == (start, end) { return (start, end); }
+    }
+}
+
 fn merge_selection(session: &mut Session, segments: Vec<Segment>, turns: Vec<Turn>, start: f64, end: f64) {
-    let old: Vec<Segment> = session
-        .segments
-        .iter()
+    let old: Vec<Segment> = session.segments.iter()
         .filter(|segment| segment.speaker < ME && overlaps_time(segment.start, segment.end, start, end))
-        .cloned()
-        .collect();
-    session.segments.retain(|segment| segment.speaker == ME || !overlaps_time(segment.start, segment.end, start, end));
-    session.turns.retain(|turn| turn.speaker == ME || !overlaps_time(turn.start, turn.end, start, end));
-    let mut incoming = Vec::new();
-    for speaker in segments.iter().map(|segment| segment.speaker).chain(turns.iter().map(|turn| turn.speaker)) {
-        if speaker < ME && !incoming.contains(&speaker) {
-            incoming.push(speaker);
+        .cloned().collect();
+    // Defend against results requested before a boundary turn was added/changed.
+    // Keeping the complete old sentence avoids discarding words we cannot split accurately.
+    let protected: Vec<(f64, f64)> = session.turns.iter()
+        .filter(|turn| turn.speaker != ME && overlaps_time(turn.start, turn.end, start, end)
+            && (turn.start < start || turn.end > end))
+        .map(|turn| (turn.start, turn.end)).collect();
+    session.turns.retain(|turn| turn.speaker == ME
+        || !overlaps_time(turn.start, turn.end, start, end)
+        || turn.start < start || turn.end > end);
+    let previous = std::mem::take(&mut session.segments);
+    for segment in previous {
+        if segment.speaker == ME || !overlaps_time(segment.start, segment.end, start, end) {
+            session.segments.push(segment);
+        } else {
+            if segment.start < start {
+                session.segments.push(Segment { speaker: segment.speaker, start: segment.start, end: start });
+            }
+            if segment.end > end {
+                session.segments.push(Segment { speaker: segment.speaker, start: end, end: segment.end });
+            }
         }
     }
+    let mut incoming: Vec<u8> = segments.iter().map(|row| row.speaker)
+        .chain(turns.iter().map(|row| row.speaker)).filter(|id| *id < ME).collect();
+    incoming.sort_unstable();
+    incoming.dedup();
+    // Score the whole voice, not just its single longest segment. Each old ID
+    // may be claimed only once, so distinct incoming voices remain distinct.
+    let mut scores = std::collections::BTreeMap::<(u8, u8), f64>::new();
+    for segment in &segments {
+        if segment.speaker >= ME { continue; }
+        for previous in &old {
+            let overlap = (segment.end.min(previous.end).min(end)
+                - segment.start.max(previous.start).max(start)).max(0.0);
+            *scores.entry((segment.speaker, previous.speaker)).or_default() += overlap;
+        }
+    }
+    let mut scores: Vec<_> = scores.into_iter().collect();
+    scores.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     let mut map = HashMap::<u8, u8>::new();
+    let mut claimed = std::collections::HashSet::new();
+    for ((new, old), overlap) in scores {
+        if overlap >= 0.3 && !map.contains_key(&new) && claimed.insert(old) {
+            map.insert(new, old);
+        }
+    }
+    // Reserve existing named IDs too: an unmatched voice must not inherit a name.
+    let mut used: std::collections::HashSet<u8> = session.segments.iter().map(|row| row.speaker)
+        .chain(session.turns.iter().map(|row| row.speaker))
+        .chain(session.speakers.keys().filter_map(|key| key.parse::<u8>().ok()))
+        .chain(old.iter().map(|row| row.speaker))
+        .chain(map.values().copied()).filter(|id| *id < ME).collect();
     for speaker in incoming {
-        let mut best: Option<(u8, f64)> = None;
-        for segment in segments.iter().filter(|segment| segment.speaker == speaker) {
-            for previous in &old {
-                let overlap = (segment.end.min(previous.end) - segment.start.max(previous.start)).max(0.0);
-                if overlap > best.map(|(_, value)| value).unwrap_or(0.0) {
-                    best = Some((previous.speaker, overlap));
-                }
-            }
-        }
-        if let Some((id, overlap)) = best {
-            if overlap >= 0.3 {
-                map.insert(speaker, id);
-                continue;
-            }
-        }
-        let mut used = std::collections::HashSet::new();
-        for id in session
-            .segments
-            .iter()
-            .map(|segment| segment.speaker)
-            .chain(session.turns.iter().map(|turn| turn.speaker))
-            .chain(map.values().copied())
-        {
-            if id < ME {
-                used.insert(id);
-            }
-        }
-        if let Some(id) = (0..ME).find(|id| !used.contains(id)) {
-            map.insert(speaker, id);
-        } else if let Some((id, _)) = best {
-            map.insert(speaker, id);
-        }
+        if map.contains_key(&speaker) { continue; }
+        let id = (0..ME).find(|id| !used.contains(id)).unwrap_or(UNASSIGNED_SPEAKER);
+        used.insert(id);
+        map.insert(speaker, id);
     }
     for segment in segments {
-        if segment.speaker >= ME {
-            continue;
-        }
+        if segment.speaker == ME { continue; }
         let speaker = map.get(&segment.speaker).copied().unwrap_or(segment.speaker);
-        session.segments.push(Segment { speaker, start: segment.start, end: segment.end });
+        let a = segment.start.max(start);
+        let b = segment.end.min(end);
+        if b > a { session.segments.push(Segment { speaker, start: a, end: b }); }
     }
     for turn in turns {
-        if turn.speaker >= ME {
+        if turn.speaker == ME || protected.iter().any(|&(a, b)| overlaps_time(turn.start, turn.end, a, b)) {
             continue;
         }
         let speaker = map.get(&turn.speaker).copied().unwrap_or(turn.speaker);
         session.turns.push(Turn { speaker, start: turn.start, end: turn.end, text: turn.text });
     }
-    session.segments.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
-    session.turns.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    session.segments.sort_by(|a, b| a.start.total_cmp(&b.start));
+    session.turns.sort_by(|a, b| a.start.total_cmp(&b.start));
+}
+
+fn recover_live_audio(root: &Path, session: &mut Session) -> Result<(), String> {
+    let dir = session.dir(root);
+    let audio = dir.join("audio.wav");
+    let existing = media::peaks_from_wav(&audio, 2000);
+    let (duration, peaks) = match existing {
+        Ok(value) if value.0 > 0.0 => value,
+        _ => {
+            mix_wavs(&dir.join("desktop.wav"), &dir.join("mic.wav"), &audio)?;
+            media::peaks_from_wav(&audio, 2000).map_err(|error| error.to_string())?
+        }
+    };
+    session.duration = duration;
+    session.peaks = peaks;
+    session.media_file = "audio.wav".into();
+    Ok(())
 }
 
 impl CaptureHub {
@@ -2659,4 +2782,75 @@ mod tests {
         let alias = level(15000.0);
         assert!(speech > alias * 4.0, "speech {speech} alias {alias}");
     }
+
+    #[test]
+    fn selection_expands_to_complete_crossing_turns() {
+        let mut session = Session::new("Boundary", "file");
+        session.duration = 20.0;
+        session.turns = vec![
+            Turn { speaker: 0, start: 0.0, end: 10.0, text: "before inside after".into() },
+            Turn { speaker: 1, start: 10.0, end: 15.0, text: "adjacent".into() },
+        ];
+        assert_eq!(selection_range(&session, 4.0, 6.0), (0.0, 10.0));
+        assert_eq!(selection_range(&session, 4.0, 4.0), (4.0, 4.0));
+    }
+
+    #[test]
+    fn selection_preserves_segment_tails_and_unexpected_boundary_text() {
+        let mut session = Session::new("Boundary", "file");
+        session.segments = vec![Segment { speaker: 0, start: 0.0, end: 10.0 }];
+        session.turns = vec![Turn { speaker: 0, start: 0.0, end: 10.0, text: "before inside after".into() }];
+        merge_selection(&mut session,
+            vec![Segment { speaker: 0, start: 4.0, end: 6.0 }],
+            vec![Turn { speaker: 0, start: 4.0, end: 6.0, text: "inside".into() }], 4.0, 6.0);
+        assert!(session.segments.iter().any(|row| row.start == 0.0 && row.end == 4.0));
+        assert!(session.segments.iter().any(|row| row.start == 6.0 && row.end == 10.0));
+        assert_eq!(session.turns.len(), 1);
+        assert_eq!(session.turns[0].text, "before inside after");
+    }
+
+    #[test]
+    fn selection_retains_uncertain_words() {
+        let mut session = Session::new("Uncertain", "file");
+        merge_selection(&mut session, vec![], vec![
+            Turn { speaker: UNASSIGNED_SPEAKER, start: 0.0, end: 1.0, text: "unknown".into() },
+            Turn { speaker: OVERLAP_SPEAKER, start: 1.0, end: 2.0, text: "together".into() },
+        ], 0.0, 2.0);
+        assert_eq!(session.turns.len(), 2);
+        assert!(transcript_text(&session, 0.0, 2.0, 8).contains("together"));
+        assert!(transcript_text(&session, 0.0, 2.0, 8).contains("unknown"));
+    }
+
+    #[test]
+    fn selection_does_not_collapse_distinct_voices_or_reuse_names() {
+        let mut session = Session::new("Voices", "file");
+        session.segments = vec![Segment { speaker: 3, start: 0.0, end: 10.0 }];
+        session.speakers.insert("3".into(), SpeakerInfo { name: "Cara".into() });
+        session.speakers.insert("0".into(), SpeakerInfo { name: "Alice elsewhere".into() });
+        merge_selection(&mut session, vec![
+            Segment { speaker: 0, start: 0.0, end: 5.0 },
+            Segment { speaker: 1, start: 5.0, end: 10.0 },
+        ], vec![
+            Turn { speaker: 0, start: 0.0, end: 5.0, text: "first".into() },
+            Turn { speaker: 1, start: 5.0, end: 10.0, text: "second".into() },
+        ], 0.0, 10.0);
+        assert_ne!(session.turns[0].speaker, session.turns[1].speaker);
+        assert!(session.turns.iter().all(|row| row.speaker != 0));
+    }
+
+    #[test]
+    fn interrupted_live_recording_is_recovered_from_raw_audio() {
+        let root = std::env::temp_dir().join(format!("speaker-recover-{}", uuid::Uuid::new_v4()));
+        let mut session = Session::new("Interrupted", "live");
+        let dir = session.dir(&root);
+        let mut wav = media::LiveWav::create(&dir.join("desktop.wav")).unwrap();
+        wav.push(&vec![1234; 16000]).unwrap();
+        drop(wav);
+        recover_live_audio(&root, &mut session).unwrap();
+        assert_eq!(session.duration, 1.0);
+        assert_eq!(session.media_file, "audio.wav");
+        assert!(dir.join("audio.wav").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
 }

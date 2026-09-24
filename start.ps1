@@ -7,6 +7,8 @@ if (-not (Test-Path $pythonExe)) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the speech engine. Install Python 3.11 or newer and try again.' }
 }
 
+$readyMarker = Join-Path $envRoot 'speaker-studio-ready'
+if (Test-Path -LiteralPath $readyMarker) { Remove-Item -LiteralPath $readyMarker -Force }
 $ready = $false
 try {
     & $pythonExe -c "import torch,faster_whisper,yt_dlp,soundfile,librosa,transformers,os; p=os.path.join(os.path.dirname(transformers.__file__),'models','nemotron3_diarization'); assert os.path.isdir(p), 'diarization model code missing'"
@@ -25,6 +27,10 @@ if (-not $ready) {
     if ($LASTEXITCODE -ne 0) { throw 'Could not install Nemotron 3 support from transformers.' }
 }
 
+# Only mark setup complete after imports work. A partial installation must be retried.
+& $pythonExe -c "import torch,faster_whisper,yt_dlp,soundfile,librosa,transformers,os; p=os.path.join(os.path.dirname(transformers.__file__),'models','nemotron3_diarization'); assert os.path.isdir(p), 'diarization model code missing'"
+if ($LASTEXITCODE -ne 0) { throw 'Speech engine verification failed. Run start.ps1 again to repair it.' }
+
 Write-Host "Building Speaker Studio."
 Push-Location $projectRoot
 try {
@@ -32,7 +38,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Could not build Speaker Studio.' }
     $app = Join-Path $projectRoot 'Speaker Studio.exe'
     Copy-Item (Join-Path $projectRoot 'target\release\speaker-studio.exe') $app -Force
-    Start-Process $app
+    Set-Content -LiteralPath $readyMarker -Value 'ready' -Encoding Ascii
+    Start-Process $app -WindowStyle Hidden
 } finally {
     Pop-Location
 }
